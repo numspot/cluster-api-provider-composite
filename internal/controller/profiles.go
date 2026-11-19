@@ -95,8 +95,11 @@ func profileBindingFor(
 		InfrastructureRevision: templates.infrastructure, BootstrapRevision: templates.bootstrap,
 		Provider: string(catalog.Spec.Provider), Account: catalog.Spec.Account, Region: catalog.Spec.Region,
 	}
-	if !validProviderTarget(&binding) || !validBindingRecord(&binding) || (previous != nil && *previous != binding) {
+	if !validProviderTarget(&binding) || !validBindingRecord(&binding) {
 		return providerBinding{}, errProfileMismatch
+	}
+	if previous != nil && *previous != binding {
+		return providerBinding{}, profileRevisionDiagnostic(previous, &binding, catalog)
 	}
 	return binding, nil
 }

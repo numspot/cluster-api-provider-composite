@@ -476,6 +476,43 @@ Helm ownership to clusterctl.
 
 ## Recovery
 
+### Attachment pin mismatches
+
+`ProfileMismatch` distinguishes several guards. Read the CompositeProvider condition
+message, not CompositeCluster `Ready` or `ProvidersReady`, to identify the blocker:
+attachment readiness is independent of cluster infrastructure readiness.
+
+| Diagnostic evidence | Meaning and safe next step |
+|---|---|
+| Provider-local pin missing/invalid/conflicting | The provider's `compositeprovider.infrastructure.cluster.x-k8s.io/binding` annotation does not match its entry in the CompositeCluster's `compositecluster.infrastructure.cluster.x-k8s.io/provider-attachments` annotation. Preserve both and compare verified backups; neither is editable configuration. |
+| CompositeProvider UID mismatch | The cluster-level record belongs to a different provider incarnation. A recreated provider with the same name/spec cannot inherit that identity. Inspect the recorded and live UIDs before planning replacement. |
+| Name reserved by a retired record | Teardown completed, but the cluster-level record still reserves that attachment name. A fresh provider may have no local pin at all. Retired history is not garbage-collected; use a new attachment name only after checking native child-name uniqueness, canonical-child requirements and capacity. |
+| Profile UID or infrastructure/bootstrap source revision mismatch | The message identifies the offending profile/source and pinned versus live UID (plus generation for a source). An identical manifest under a new UID is still a replacement. Preserve existing infrastructure and investigate the source lifecycle; this is not a provider-name reservation. |
+
+The cluster annotation is a versioned map of current and retired records; the
+provider-local annotation is that provider's matching record. Local pin comparison
+is semantic: ordinary JSON formatting, key order, escaping and a trailing newline
+are accepted within the size limit. Unknown/duplicate keys, malformed/null/trailing
+JSON and actual identity changes are rejected. Diagnostic identity components are
+bounded and allowlisted; unsafe or overlong components are shown as `<omitted>`,
+never replaced with native error text or template/credential payloads.
+
+There is **no supported annotation-editing or rebind procedure**, for either an
+active source revision or a retired/recreated provider. Do not remove a retired
+record, clear a pin/finalizer or copy current status into identity metadata.
+Version source templates and profiles under new immutable names for new attachments;
+this does not migrate already-bound infrastructure. Recreating a source from a
+backup manifest does not recover its original UID. Retired identities continue to
+count toward the eight-attachment and combined 16 KiB record limits, even after
+children and live status entries disappear.
+
+These separate failure modes are illustrated in [issue #10](https://github.com/numspot/cluster-api-provider-composite/issues/10),
+the [trailing-newline report](https://github.com/numspot/cluster-api-provider-composite/issues/10#issuecomment-6989501152)
+and the [retired-provider report](https://github.com/numspot/cluster-api-provider-composite/issues/10#issuecomment-6993037251).
+Their manual annotation edits are not a supported recovery interface.
+
+### Preserve recovery evidence
+
 Keep backups of profiles, source templates, binding annotations and native owner references.
 Status can be rebuilt, but lost pins must not be guessed from today's profile or
 from resource names. Restore only verified metadata/configuration with matching

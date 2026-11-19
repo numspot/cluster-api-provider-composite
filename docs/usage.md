@@ -489,14 +489,26 @@ record `observedGeneration`; individual conditions also carry their generation.
 Conditions under `providers[]` refer to the CompositeProvider generation, not the
 CompositeCluster generation. Check generations, pause and deletion state before treating an observation as
 current. Initialization stays latched after first success, whereas Ready tracks health.
-The controller-owned binding annotation is authoritative identity, not editable
-configuration. See [operations](operations.md#recovery) for recovery precautions.
+`lastTransitionTime` records a condition's status transition, not the last reconcile:
+repeated failures can legitimately retain an old timestamp, and changing a reason
+or diagnostic message alone does not advance it. `observedGeneration` identifies
+the observed spec generation, not a heartbeat. Identical observations do not write
+status or emit repeated Events. Provider Ready status/reason changes emit an Event
+only after the status write succeeds; changing diagnostic evidence alone is not
+an Event heartbeat.
+
+Both controller-owned pin annotations are authoritative identity, not editable
+configuration. The CompositeCluster attachment map retains provider identity/history;
+the CompositeProvider local pin must match its entry. Formatting changes (including
+a trailing newline) are harmless, but identity changes are not. See
+[pin mismatches](operations.md#attachment-pin-mismatches) for source drift versus
+provider UID/retired-name diagnostics and recovery precautions.
 
 | Observation | Check |
 |---|---|
 | `WaitingForCluster` | CAPI owner, infrastructure reference and owner UID |
 | `ProfileUnavailable` | Profile and source-template references, versions, namespaces, deletion state and permissions |
-| `ProfileMismatch` | Profile UID or source UID/generation differs from the pin; do not rebind from status |
+| `ProfileMismatch` | Read the message: local pin conflict, provider UID mismatch/retired-name reservation, or profile/source UID/generation mismatch; never rebind from status |
 | `OverrideRejected` | Effective allowed/protected paths, shared bootstrap and JSON shape |
 | `InvalidComposition` | Distinct GroupKind/name identities, a canonical child per kind, unique zones, immutable names and binding-size limits |
 | `ProviderNotInstalled` | Native CRD and served contract labels |

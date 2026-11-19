@@ -34,13 +34,15 @@ import (
 	"github.com/numspot/cluster-api-provider-composite/internal/profile"
 )
 
-// diagnosticMessage classifies errors but never includes their potentially secret details.
+// diagnosticMessage classifies errors without copying their potentially secret
+// details. Pin diagnostics carry only explicitly allowlisted, bounded identity.
 //
 //nolint:gocyclo // Keep the fixed diagnostic allowlist and its precedence together.
 func diagnosticMessage(err error) string {
 	_, syntaxError := errors.AsType[*json.SyntaxError](err)
 	_, typeError := errors.AsType[*json.UnmarshalTypeError](err)
 	networkError, isNetworkError := errors.AsType[net.Error](err)
+	pinError, isPinError := errors.AsType[*pinDiagnosticError](err)
 	switch {
 	case err == nil:
 		return ""
@@ -62,6 +64,8 @@ func diagnosticMessage(err error) string {
 		return "Referenced profile is missing, deleting or awaiting catalog protection; existing infrastructure is retained."
 	case errors.Is(err, errTemplateUnavailable), errors.Is(err, errInvalidTemplate):
 		return "Referenced source template is missing, deleting or invalid; check its kind, namespace, name and template payload."
+	case isPinError:
+		return pinError.message
 	case errors.Is(err, errProfileMismatch), errors.Is(err, errProfilePinMissing):
 		return "Profile or source-template revision does not match its durable pin; review recovery evidence without rebinding existing infrastructure."
 	case errors.Is(err, profile.ErrInvalidCredentials):

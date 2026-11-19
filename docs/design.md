@@ -178,6 +178,16 @@ anything else select a port, host, or `{host, port}` value respectively.
 
 Controller-owned attachment metadata records durable native/bootstrap names,
 provider and cluster UIDs, template UID and both source UID/generation pairs.
+The CompositeCluster's
+`compositecluster.infrastructure.cluster.x-k8s.io/provider-attachments` annotation
+holds the versioned map, including retired records. Each CompositeProvider's
+`compositeprovider.infrastructure.cluster.x-k8s.io/binding` annotation holds its
+matching record. The provider-local pin is strictly decoded and compared by value:
+JSON field order, indentation, escaping and trailing whitespace do not change
+identity. Unknown/duplicate fields (including escaped spellings), malformed or
+trailing JSON, oversized records and changed identity still fail closed. Neither
+annotation is user configuration or a supported rebind interface; status cannot
+replace either pin.
 No configuration hash is computed. Historical cluster provider-bindings records
 are unsupported: finish legacy teardown using a compatible controller before
 upgrading, then create fresh resource-based attachments. Do not rewrite old pins

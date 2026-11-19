@@ -188,6 +188,13 @@ Named infrastructure regressions cover same-kind regions, canonical lookup,
 immutable names, source UID/generation drift, status recovery, ownership rejection
 and source-independent teardown. Current attachment/source pins and name rules
 remain covered without silently rebinding recreated providers or templates.
+`TestAttachmentPin` unit tests exercise equivalent JSON encodings versus malformed,
+unknown/duplicate/trailing data and changes to every pinned identity field. Pin
+diagnostic regressions preserve error identity and reject unsafe/oversized diagnostic
+components without losing both source revisions. The provider attachment envtests
+cover formatting-only convergence, conflicting pins, recreated source evidence and
+retired-name reservation without modifying durable identity or existing children.
+No recovery/rebind mechanism is implied by these tests.
 
 `make test TEST=TestProviderAttachment` covers namespaced attachments, independent
 empty-cluster readiness, credential injection/protection, source drift, reference

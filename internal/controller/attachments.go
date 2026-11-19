@@ -213,7 +213,7 @@ func (r *CompositeClusterReconciler) prepareAttachmentPlans(
 		p := &providers[i]
 		previous := result.bindings.Providers[p.Name]
 		if previous != nil && (previous.UID != p.UID || (previous.Retired && p.DeletionTimestamp.IsZero())) {
-			return &attachmentFailure{p, infrav1.ProfileMismatchReason, errProfileMismatch}
+			return &attachmentFailure{p, infrav1.ProfileMismatchReason, providerIdentityDiagnostic(p, previous)}
 		}
 		if !p.DeletionTimestamp.IsZero() {
 			continue
@@ -323,12 +323,12 @@ func checkAttachmentPin(cc *infrav1.CompositeCluster, p *infrav1.CompositeProvid
 		return infrav1.ChildNotOwnedReason, errProfileMismatch
 	}
 	if raw := p.Annotations[infrav1.ProviderBindingAnnotation]; raw != "" {
-		encoded, _ := json.Marshal(previous)
-		if previous == nil || raw != string(encoded) {
-			return infrav1.ProfileMismatchReason, errProfilePinMissing
+		pin := decodeAttachmentPin(raw)
+		if previous == nil || !validAttachmentBinding(cc, p.Name, pin) || !reflect.DeepEqual(pin, previous) {
+			return infrav1.ProfileMismatchReason, providerLocalPinDiagnostic()
 		}
 	} else if previous != nil && controllerutil.ContainsFinalizer(p, infrav1.ProviderAttachmentFinalizer) {
-		return infrav1.ProfileMismatchReason, errProfilePinMissing
+		return infrav1.ProfileMismatchReason, providerLocalPinDiagnostic()
 	}
 	return "", nil
 }
