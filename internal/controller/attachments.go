@@ -54,12 +54,12 @@ type plannedAttachment struct {
 	provider *infrav1.CompositeProvider
 	plan     providerPlan
 	paused   bool
+	failure  *attachmentFailure
 }
 
 type attachmentFailure struct {
-	provider *infrav1.CompositeProvider
-	reason   string
-	cause    error
+	reason string
+	cause  error
 }
 
 type attachmentPlan struct {
@@ -166,20 +166,18 @@ func (r *CompositeClusterReconciler) planAttachments(
 	if err != nil {
 		return nil, err
 	}
+	if failure := validateAttachmentPlan(cc, nil, bindings, nil); failure != nil {
+		return nil, failure.cause
+	}
 	providers, err := r.attachmentProviders(ctx, cc)
 	if err != nil {
 		return nil, err
 	}
 	original := attachmentBindings{Version: bindings.Version, Providers: maps.Clone(bindings.Providers)}
 	result := newAttachmentPlan(providers, bindings)
-	result.failure = r.prepareAttachmentPlans(ctx, cc, providers, result)
-	if result.failure == nil {
-		result.failure = validateAttachmentPlan(cc, providers, result.bindings)
-	}
+	selection := r.prepareAttachmentPlans(ctx, cc, providers, result)
+	result.failure = validateAttachmentPlan(cc, providers, selection, result.providers)
 	if result.failure != nil {
-		if result.failure.provider == nil {
-			return nil, result.failure.cause
-		}
 		result.bindings = original
 	}
 	return result, nil
@@ -208,47 +206,75 @@ func (r *CompositeClusterReconciler) prepareAttachmentPlans(
 	cc *infrav1.CompositeCluster,
 	providers []infrav1.CompositeProvider,
 	result *attachmentPlan,
-) *attachmentFailure {
+) attachmentBindings {
+	// Failed known providers retain their durable identities. Also validate any
+	// newly resolved identity whose payload is rejected, without persisting its pin.
+	selection := attachmentBindings{Version: result.bindings.Version, Providers: maps.Clone(result.bindings.Providers)}
 	for i := range providers {
 		p := &providers[i]
+		entry := plannedAttachment{provider: p}
 		previous := result.bindings.Providers[p.Name]
-		if previous != nil && (previous.UID != p.UID || (previous.Retired && p.DeletionTimestamp.IsZero())) {
-			return &attachmentFailure{p, infrav1.ProfileMismatchReason, errProfileMismatch}
-		}
-		if !p.DeletionTimestamp.IsZero() {
+		switch {
+		case previous != nil && (previous.UID != p.UID || (previous.Retired && p.DeletionTimestamp.IsZero())):
+			entry.failure = &attachmentFailure{infrav1.ProfileMismatchReason, errProfileMismatch}
+			delete(result.retiring, p.Name)
+		case !p.DeletionTimestamp.IsZero():
 			continue
+		case isPaused(nil, p):
+			entry.paused = true
+		default:
+			prepared, binding, reason, err := r.prepareAttachment(ctx, cc, p, previous)
+			entry.plan = prepared
+			if binding != nil {
+				selection.Providers[p.Name] = binding
+			}
+			if err != nil {
+				entry.failure = &attachmentFailure{reason, err}
+			} else {
+				result.bindings.Providers[p.Name] = binding
+			}
 		}
-		if isPaused(nil, p) {
-			result.providers = append(result.providers, plannedAttachment{provider: p, paused: true})
-			continue
-		}
-		prepared, binding, reason, err := r.prepareAttachment(ctx, cc, p, previous)
-		if err != nil {
-			return &attachmentFailure{p, reason, err}
-		}
-		result.bindings.Providers[p.Name] = binding
-		result.providers = append(result.providers, plannedAttachment{provider: p, plan: prepared})
+		result.providers = append(result.providers, entry)
 	}
-	return nil
+	return selection
 }
 
 func validateAttachmentPlan(
 	cc *infrav1.CompositeCluster,
 	providers []infrav1.CompositeProvider,
 	bindings attachmentBindings,
+	plans []plannedAttachment,
 ) *attachmentFailure {
+	names := make(map[string]bool, len(bindings.Providers))
+	for name := range bindings.Providers {
+		names[name] = true
+	}
+	for i := range providers {
+		names[providers[i].Name] = true
+	}
 	err := validateAttachmentIdentities(cc, bindings)
+	if len(names) > maxProviderBindings {
+		err = errInvalidComposition
+	}
+	projection := attachmentProjection(bindings)
+	for i := range plans {
+		entry := &plans[i]
+		if bindings.Providers[entry.provider.Name] == nil && entry.plan.spec != nil {
+			// Resolving a profile establishes its declared native identity even
+			// when a missing source or invalid local pin prevents a new binding.
+			projection.providers = append(projection.providers, entry.plan)
+		}
+	}
 	if err == nil {
-		_, err = attachmentProjection(bindings).failureDomains()
+		err = validateNativeIdentities(cc, projection)
+	}
+	if err == nil {
+		_, err = projection.failureDomains()
 	}
 	if err == nil {
 		return nil
 	}
-	var p *infrav1.CompositeProvider
-	if len(providers) != 0 {
-		p = &providers[0]
-	}
-	return &attachmentFailure{p, infrav1.InvalidCompositionReason, errors.Join(errInvalidComposition, err)}
+	return &attachmentFailure{infrav1.InvalidCompositionReason, errors.Join(errInvalidComposition, err)}
 }
 
 type providerProjection struct{ providers []providerPlan }
@@ -273,8 +299,8 @@ func (p *compositionPlan) allFailureDomains() ([]infrav1.FailureDomain, error) {
 	if p.attachments == nil {
 		return nil, nil
 	}
-	// Failed preparation rolls back to durable bindings. Keep their placement
-	// observations while the failed attachment reports its own condition.
+	// Failed known attachments retain their durable placement observations;
+	// successfully prepared attachments can add their own independent placement.
 	domains, err := attachmentProjection(p.attachments.bindings).failureDomains()
 	if err != nil {
 		return nil, err
@@ -289,16 +315,46 @@ func (r *CompositeClusterReconciler) prepareAttachment(
 	p *infrav1.CompositeProvider,
 	previous *attachmentBinding,
 ) (providerPlan, *attachmentBinding, string, error) {
-	if reason, err := checkAttachmentPin(cc, p, previous); err != nil {
-		return providerPlan{}, nil, reason, err
+	if previous != nil {
+		if reason, err := checkAttachmentPin(cc, p, previous); err != nil {
+			return providerPlan{}, nil, reason, err
+		}
 	}
 	template, err := r.readUsableProfile(ctx, p.Spec.TemplateRef.Name, previous != nil)
 	if err != nil {
 		return providerPlan{}, nil, infrav1.ProfileUnavailableReason, err
 	}
+	prepared := attachmentIdentityPlan(cc, p, template)
+	if reason, err := checkAttachmentPin(cc, p, previous); err != nil {
+		return prepared, nil, reason, err
+	}
+	return r.prepareAttachmentProfile(ctx, cc, p, template, &prepared, previous)
+}
+
+func attachmentIdentityPlan(
+	cc *infrav1.CompositeCluster,
+	p *infrav1.CompositeProvider,
+	template *infrav1.CompositeProviderTemplate,
+) providerPlan {
+	spec := attachmentSpec(p, template)
+	return providerPlan{spec: spec, binding: providerBinding{
+		APIGroup: template.Spec.InfraClusterKind.APIGroup, Kind: template.Spec.InfraClusterKind.Kind,
+		ChildName: mint.ClusterInfraName(cc, spec), Provider: string(template.Spec.Provider),
+		Account: template.Spec.Account, Region: template.Spec.Region,
+	}}
+}
+
+func (r *CompositeClusterReconciler) prepareAttachmentProfile(
+	ctx context.Context,
+	cc *infrav1.CompositeCluster,
+	p *infrav1.CompositeProvider,
+	template *infrav1.CompositeProviderTemplate,
+	prepared *providerPlan,
+	previous *attachmentBinding,
+) (providerPlan, *attachmentBinding, string, error) {
 	sources, err := resolveProfileTemplates(ctx, r.apiReader(), template)
 	if err != nil {
-		return providerPlan{}, nil, infrav1.ProfileUnavailableReason, err
+		return *prepared, nil, infrav1.ProfileUnavailableReason, err
 	}
 	if len(template.Spec.CredentialsNamePaths) != 0 || p.Spec.CredentialsRef.Name != "" {
 		sources.configuration.CredentialsRef = infrav1.ProviderCredentialsReference{
@@ -306,16 +362,15 @@ func (r *CompositeClusterReconciler) prepareAttachment(
 			NamePaths: slices.Clone(template.Spec.CredentialsNamePaths),
 		}
 	}
-	spec := attachmentSpec(p, template)
 	var old *providerBinding
 	if previous != nil {
 		old = &previous.Binding
 	}
-	native, err := profileBindingFor(cc, spec, template, sources, old)
+	native, err := profileBindingFor(cc, prepared.spec, template, sources, old)
 	if err != nil {
-		return providerPlan{}, nil, profileBindingFailureReason(err), err
+		return *prepared, nil, profileBindingFailureReason(err), err
 	}
-	return r.resolveAttachmentPayload(ctx, cc, p, spec, sources, &native, previous)
+	return r.resolveAttachmentPayload(ctx, cc, p, prepared.spec, sources, &native, previous)
 }
 
 func checkAttachmentPin(cc *infrav1.CompositeCluster, p *infrav1.CompositeProvider, previous *attachmentBinding) (string, error) {
@@ -363,30 +418,32 @@ func (r *CompositeClusterReconciler) resolveAttachmentPayload(
 	}
 	payload, err := profile.Resolve(&sources.configuration, cc.Spec.Bootstrap, &spec.InfraSpec, spec.Bootstrap)
 	if err != nil {
-		return providerPlan{}, nil, infrav1.OverrideRejectedReason, fmt.Errorf("resolving attachment overrides: %w", err)
+		return providerPlan{}, binding, infrav1.OverrideRejectedReason, fmt.Errorf("resolving attachment overrides: %w", err)
 	}
 	if previous == nil {
 		if err := r.checkUnboundProfileResources(ctx, cc, native); err != nil {
-			return providerPlan{}, nil, profileBindingFailureReason(err), err
+			return providerPlan{}, binding, profileBindingFailureReason(err), err
 		}
 	}
 	return providerPlan{spec: spec, payload: payload, binding: *native}, binding, "", nil
 }
 
 func validateAttachmentIdentities(cc *infrav1.CompositeCluster, attachments attachmentBindings) error {
-	if len(attachments.Providers) > maxProviderBindings {
-		return errInvalidComposition
+	if err := validateNativeIdentities(cc, attachmentProjection(attachments)); err != nil {
+		return err
 	}
-	combined := map[string]providerBinding{}
-	for name, attachment := range attachments.Providers {
-		if !attachment.Retired {
-			combined[name] = attachment.Binding
-		}
-	}
+	_, err := encodeAttachmentBindings(cc, attachments)
+	return err
+}
+
+func validateNativeIdentities(cc *infrav1.CompositeCluster, projection *providerProjection) error {
+	combined := make(map[string]providerBinding, len(projection.providers))
 	used := map[nativeChildIdentity]bool{}
 	canonical := map[schema.GroupKind]bool{}
-	for name := range combined {
-		binding := combined[name]
+	for i := range projection.providers {
+		p := &projection.providers[i]
+		binding := p.binding
+		combined[string(p.spec.Name)] = binding
 		identity := nativeChildIdentity{groupKind: binding.groupKind(), name: binding.ChildName}
 		if used[identity] {
 			return errInvalidComposition
@@ -394,11 +451,7 @@ func validateAttachmentIdentities(cc *infrav1.CompositeCluster, attachments atta
 		used[identity] = true
 		canonical[binding.groupKind()] = canonical[binding.groupKind()] || identity.name == cc.Name
 	}
-	if err := validateCanonicalBindings(combined, canonical); err != nil {
-		return err
-	}
-	_, err := encodeAttachmentBindings(cc, attachments)
-	return err
+	return validateCanonicalBindings(combined, canonical)
 }
 
 func attachmentDiagnostic(failure *attachmentFailure) string {
@@ -408,16 +461,28 @@ func attachmentDiagnostic(failure *attachmentFailure) string {
 	return diagnosticMessage(failure.cause)
 }
 
+func attachmentBindingsForPersistence(cc *infrav1.CompositeCluster, plan *attachmentPlan) (string, error) {
+	raw, err := encodeAttachmentBindings(cc, plan.bindings)
+	if err != nil {
+		return "", err
+	}
+	if len(plan.bindings.Providers) == 0 && slices.ContainsFunc(plan.providers, func(entry plannedAttachment) bool { return entry.failure != nil }) {
+		// A failed first attachment does not create binding history. A truly
+		// empty composition still persists its normal empty envelope.
+		return cc.Annotations[infrav1.ProviderAttachmentsAnnotation], nil
+	}
+	return raw, nil
+}
+
 // Persist the complete attachment identity and cluster finalizer atomically,
 // before any normal status snapshot or native child write.
 func (r *CompositeClusterReconciler) persistCompositionBindings(ctx context.Context, cc *infrav1.CompositeCluster, plan *attachmentPlan) error {
-	raw := cc.Annotations[infrav1.ProviderAttachmentsAnnotation]
-	if plan != nil && plan.failure == nil {
-		var err error
-		raw, err = encodeAttachmentBindings(cc, plan.bindings)
-		if err != nil {
-			return err
-		}
+	if plan == nil || plan.failure != nil {
+		return nil
+	}
+	raw, err := attachmentBindingsForPersistence(cc, plan)
+	if err != nil {
+		return err
 	}
 	added := cc.DeletionTimestamp.IsZero() && controllerutil.AddFinalizer(cc, infrav1.ClusterFinalizer)
 	if raw == cc.Annotations[infrav1.ProviderAttachmentsAnnotation] && !added {

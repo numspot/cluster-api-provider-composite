@@ -301,8 +301,14 @@ See [cluster attachments](usage.md#create-a-cluster-attachment) and
 Observe provider Ready and its generation separately from Cluster InfrastructureReady.
 Address template, credential-path and native failures on the provider/native
 resources; CompositeCluster has no provider-selection field. Publishing a profile
-does not attach it. Composite needs read-only worker/bootstrap provenance permissions
-for retirement, not Secret read permissions.
+does not attach it. A local pin/profile/source or native-operation failure is
+reported on that provider; valid new and recovering attachments continue independently.
+Known failed bindings and protection remain intact. Composition-wide identity,
+canonical, zone and durable-record failures still block binding/native writes; do
+not bypass them by removing pins or finalizers. Conditions and state Events describe
+changes, not heartbeats, so an unchanged failure need not receive a fresh timestamp.
+Composite needs read-only worker/bootstrap provenance permissions for retirement,
+not Secret read permissions.
 
 Keep provider credentials in each consumer's namespace throughout teardown.
 Use profile names as immutable revisions. A profile's `ConfigurationValid`

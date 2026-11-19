@@ -212,9 +212,8 @@ func (r *CompositeClusterReconciler) reconcileNormalStatus(
 	setCondition(&cc.Status.Conditions, cc.Generation,
 		infrav1.PausedCondition, metav1.ConditionFalse, infrav1.NotPausedReason, "")
 	res, err := r.reconcileNormal(ctx, cc, cluster, plan)
-	if err != nil {
-		markObservationFailed(cc, err)
-	}
+	// Attachment operation errors are reported on each provider; they do not
+	// invalidate the independently observed CompositeCluster infrastructure.
 	err = errors.Join(err, r.refreshProviderStatuses(ctx, cc, cluster))
 	return res, errors.Join(err, r.patchStatus(ctx, original, cc))
 }
@@ -330,6 +329,7 @@ func (r *CompositeClusterReconciler) reconcileNormal(
 
 	domains, err := plan.allFailureDomains()
 	if err != nil {
+		markObservationFailed(cc, err)
 		return ctrl.Result{}, err
 	}
 	// Provider attachments have independent readiness; an empty infrastructure

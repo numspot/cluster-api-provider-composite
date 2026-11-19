@@ -489,6 +489,14 @@ record `observedGeneration`; individual conditions also carry their generation.
 Conditions under `providers[]` refer to the CompositeProvider generation, not the
 CompositeCluster generation. Check generations, pause and deletion state before treating an observation as
 current. Initialization stays latched after first success, whereas Ready tracks health.
+Each attachment is prepared and observed independently: a local profile, source,
+pin or native-operation failure does not prevent valid new attachments or another
+provider's recovery. Global identity/canonical, zone and binding-record validation
+still precedes every binding or native write. Failed known providers keep their
+existing pins and references; failed first attachments do not gain invented history.
+Conditions are not heartbeats: unchanged observations preserve transition times and
+do not repeat status writes or state Events.
+
 The controller-owned binding annotation is authoritative identity, not editable
 configuration. See [operations](operations.md#recovery) for recovery precautions.
 
@@ -529,6 +537,7 @@ bindings are refused. Let the controller release finalizers. Operator uninstall
 alone does not clean up workloads.
 
 Source templates are administrator-managed and are not covered by the profile's
-deletion finalizer. Retain them while in use; deleting one blocks normal
-reconciliation but does not delete consumer infrastructure or prevent safely bound
-teardown. A source bootstrap template cannot also be a consumer's generated output.
+deletion finalizer. Retain them while in use; deleting one blocks that attachment's
+normal reconciliation but does not delete consumer infrastructure, block unrelated
+valid attachments or prevent safely bound teardown. Global composition checks still
+apply. A source bootstrap template cannot also be a consumer's generated output.

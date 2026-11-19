@@ -47,9 +47,7 @@ func (r *CompositeClusterReconciler) finishNormalReconcile(
 	endpoint infrav1.APIEndpoint,
 	plan *attachmentPlan,
 ) (reconcile.Result, error) {
-	if err := r.protectAttachments(ctx, cc, cluster, plan); err != nil {
-		return reconcile.Result{}, err
-	}
+	r.protectAttachments(ctx, cc, cluster, plan)
 	pending, err := r.reconcileAttachments(ctx, cc, cluster, endpoint, plan)
 	if err != nil {
 		return reconcile.Result{}, err
@@ -68,34 +66,45 @@ func (r *CompositeClusterReconciler) protectAttachments(
 	cc *infrav1.CompositeCluster,
 	cluster *clusterFacts,
 	plan *attachmentPlan,
-) error {
+) {
 	if plan == nil || plan.failure != nil {
-		return nil
+		return
 	}
 	for i := range plan.providers {
 		entry := &plan.providers[i]
-		if entry.paused {
+		if entry.paused || entry.failure != nil {
 			continue
 		}
-		p := entry.provider
-		before := p.DeepCopy()
-		encoded, _ := json.Marshal(plan.bindings.Providers[p.Name])
-		if p.Annotations == nil {
-			p.Annotations = map[string]string{}
+		if err := r.protectAttachment(ctx, cc, cluster, entry.provider, plan.bindings.Providers[entry.provider.Name]); err != nil {
+			entry.failure = &attachmentFailure{cause: err}
 		}
-		p.Annotations[infrav1.ProviderBindingAnnotation] = string(encoded)
-		controllerutil.AddFinalizer(p, infrav1.ProviderAttachmentFinalizer)
-		if err := controllerutil.SetControllerReference(cc, p, r.Scheme()); err != nil {
-			return fmt.Errorf("protecting provider ownership: %w", err)
-		}
-		if p.Labels == nil {
-			p.Labels = map[string]string{}
-		}
-		p.Labels[clusterv1.ClusterNameLabel] = cluster.Name
-		if !reflect.DeepEqual(before.ObjectMeta, p.ObjectMeta) {
-			if err := r.Update(ctx, p); err != nil {
-				return fmt.Errorf("persisting provider pin and finalizer: %w", err)
-			}
+	}
+}
+
+func (r *CompositeClusterReconciler) protectAttachment(
+	ctx context.Context,
+	cc *infrav1.CompositeCluster,
+	cluster *clusterFacts,
+	p *infrav1.CompositeProvider,
+	binding *attachmentBinding,
+) error {
+	before := p.DeepCopy()
+	encoded, _ := json.Marshal(binding)
+	if p.Annotations == nil {
+		p.Annotations = map[string]string{}
+	}
+	p.Annotations[infrav1.ProviderBindingAnnotation] = string(encoded)
+	controllerutil.AddFinalizer(p, infrav1.ProviderAttachmentFinalizer)
+	if err := controllerutil.SetControllerReference(cc, p, r.Scheme()); err != nil {
+		return fmt.Errorf("protecting provider ownership: %w", err)
+	}
+	if p.Labels == nil {
+		p.Labels = map[string]string{}
+	}
+	p.Labels[clusterv1.ClusterNameLabel] = cluster.Name
+	if !reflect.DeepEqual(before.ObjectMeta, p.ObjectMeta) {
+		if err := r.Update(ctx, p); err != nil {
+			return fmt.Errorf("persisting provider pin and finalizer: %w", err)
 		}
 	}
 	return nil
@@ -112,26 +121,58 @@ func (r *CompositeClusterReconciler) reconcileAttachments(
 		return false, nil
 	}
 	if plan.failure != nil {
-		failure := plan.failure
-		if !expectedAttachmentFailure(failure.cause) {
-			return true, r.reportAttachmentObservationError(ctx, failure.provider, failure.cause)
-		}
-		if err := r.reportAttachmentFailure(ctx, failure.provider, failure.reason, attachmentDiagnostic(failure)); err != nil {
-			return false, err
-		}
-		_, err := r.retireAttachments(ctx, cc, plan)
-		return true, err
+		return true, r.reportAttachmentCompositionFailure(ctx, plan)
 	}
 	pending := false
+	var failures []error
 	for i := range plan.providers {
-		ready, err := r.reconcileAttachment(ctx, cc, cluster, endpoint, &plan.providers[i])
-		if err != nil {
-			return false, err
-		}
-		pending = pending || !ready
+		entry := &plan.providers[i]
+		ready, err := r.reconcilePlannedAttachment(ctx, cc, cluster, endpoint, entry)
+		failures = append(failures, err)
+		pending = pending || !ready || err != nil
 	}
 	retiring, err := r.retireAttachments(ctx, cc, plan)
-	return pending || retiring, err
+	return pending || retiring, errors.Join(append(failures, err)...)
+}
+
+func (r *CompositeClusterReconciler) reportAttachmentCompositionFailure(ctx context.Context, plan *attachmentPlan) error {
+	var failures []error
+	for i := range plan.providers {
+		entry := &plan.providers[i]
+		if entry.paused {
+			continue
+		}
+		failure := entry.failure
+		if failure == nil {
+			failure = plan.failure
+		}
+		failures = append(failures, r.reportAttachmentPlanFailure(ctx, entry.provider, failure))
+	}
+	return errors.Join(failures...)
+}
+
+func (r *CompositeClusterReconciler) reconcilePlannedAttachment(
+	ctx context.Context,
+	cc *infrav1.CompositeCluster,
+	cluster *clusterFacts,
+	endpoint infrav1.APIEndpoint,
+	entry *plannedAttachment,
+) (bool, error) {
+	if entry.failure != nil {
+		return false, r.reportAttachmentPlanFailure(ctx, entry.provider, entry.failure)
+	}
+	return r.reconcileAttachment(ctx, cc, cluster, endpoint, entry)
+}
+
+func (r *CompositeClusterReconciler) reportAttachmentPlanFailure(
+	ctx context.Context,
+	p *infrav1.CompositeProvider,
+	failure *attachmentFailure,
+) error {
+	if !expectedAttachmentFailure(failure.cause) {
+		return r.reportAttachmentObservationError(ctx, p, failure.cause)
+	}
+	return r.reportAttachmentFailure(ctx, p, failure.reason, attachmentDiagnostic(failure))
 }
 
 func (r *CompositeClusterReconciler) reconcileAttachment(

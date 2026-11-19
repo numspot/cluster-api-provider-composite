@@ -112,11 +112,20 @@ namespace. Its immutable `clusterRef` selects the local CompositeCluster;
 the template declares protected `credentialsNamePaths`. Composite never reads Secrets.
 Allowed `infraSpec` and `bootstrap` overrides remain native JSON.
 
-The cluster controller validates the complete selection before writing durable
-identity. New attachments pin provider UID, CompositeCluster UID, template UID and
-both native-source UID/generation pairs. Cluster bindings and its finalizer are
-persisted together; provider pins/finalizers also precede child writes. Source
-metadata is not copied. Historical cluster provider-bindings formats are unsupported.
+The cluster controller prepares every attachment, then validates the complete
+selection before writing durable identity or native children. A provider-local
+pin, profile, source or override failure does not block independently valid new
+or recovering attachments. Failed known providers retain their durable bindings;
+resolved profiles still reserve their declared native identities when a source or
+local pin is unavailable. Native identity collisions, missing canonical bindings,
+zone conflicts and record limits remain composition-wide write barriers; malformed
+durable records fail closed before preparation.
+
+New attachments pin provider UID, CompositeCluster UID, template UID and both
+native-source UID/generation pairs. Cluster bindings and its finalizer are persisted
+together; each provider's pins/finalizers also precede its child writes. Failed
+first attachments acquire no guessed binding history. Source metadata is not
+copied. Historical cluster provider-bindings formats are unsupported.
 
 Provider observations live on `CompositeProvider.status`, including current Ready,
 latched initialization and infrastructure/bootstrap references. CompositeCluster
@@ -256,8 +265,12 @@ ownership drift and repeated updates.
 Initialization is latched after success; Ready reports current health. Explicit
 False, Unknown and stale native conditions must not become healthy from an old
 initialization bit. Check condition generations and pause/deletion state.
-Profile-backed attachment conditions supplement aggregate health; failed expansion
-can leave earlier observations at their previous generation.
+Each attachment receives its own current observation even when another attachment
+fails preparation or a native operation. Unexpected API errors preserve error
+identity, durable pins, protection and last known child references; the failed
+provider reports Ready=Unknown without gating CompositeCluster readiness.
+Condition transition times describe state transitions, not reconciliation heartbeats;
+unchanged observations do not write status or repeat state Events.
 
 Native failure-domain names remain unchanged and must be unique across the
 composition. Limits are eight attachments, sixteen zones per attachment and one

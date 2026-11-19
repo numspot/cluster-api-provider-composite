@@ -192,6 +192,13 @@ remain covered without silently rebinding recreated providers or templates.
 `make test TEST=TestProviderAttachment` covers namespaced attachments, independent
 empty-cluster readiness, credential injection/protection, source drift, reference
 immutability, identity collisions, shared worker consumers and ordered teardown.
+The `TestProviderAttachment_Isolates` and `TestProviderAttachment_Isolation` cases
+exercise per-provider preparation failures, new-provider initialization, independent
+recovery, API-error identity/protection, stable observations, pause and source-free
+retirement. They also keep collisions (including unresolved sources/local pins),
+missing canonical identities and malformed durable records fail-closed before
+metadata/native writes. Unit coverage checks that native operation failures do not
+leave later attachments stale.
 `make test TEST=TestProviderStatus` covers the CompositeCluster provider summary,
 exact per-provider native MachineDeployment membership, independent cluster
 readiness, stable ordering, pool removal and draining-provider visibility. Unit
