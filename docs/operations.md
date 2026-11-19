@@ -476,6 +476,10 @@ Helm ownership to clusterctl.
 
 ## Recovery
 
+The [explicit recovery proposal](proposals/explicit-attachment-recovery.md) separates
+source rebind from retired attachment replacement. It is design-only: no recovery
+annotation, command or API is implemented, and the precautions below still apply.
+
 Keep backups of profiles, source templates, binding annotations and native owner references.
 Status can be rebuilt, but lost pins must not be guessed from today's profile or
 from resource names. Restore only verified metadata/configuration with matching
